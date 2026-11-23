@@ -10,3 +10,5 @@ Práctica 10 de Tecnologías de Servicios para Ciencia de Datos (ULPGC).
 
 Lanzamiento manual: pestaña **Actions** > *P10 - Contextos de GitHub Actions* >
 **Run workflow** (entradas `entorno`, `ejecutar_pruebas`, `etiqueta`).
+
+Ejecución de prueba del evento `pull_request` (rama `prueba-pr`).

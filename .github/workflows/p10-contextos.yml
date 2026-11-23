@@ -228,8 +228,9 @@ jobs:
           - os: windows-latest
             python: "3.12"
     steps:
+      # v6 se ejecuta sobre Node.js 24 (v5 generaba un aviso de Node.js 20 obsoleto)
       - name: Configurar Python ${{ matrix.python }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
 

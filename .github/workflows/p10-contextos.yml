@@ -1,0 +1,357 @@
+# P10 - GitHub Actions: variables de contexto
+# Tecnologias de Servicios para Ciencia de Datos (ULPGC) - Andrea Patruno
+#
+# Workflow de ejemplo que usa los 12 contextos de GitHub Actions:
+#   github, env, vars, job, jobs (en el workflow reutilizable), steps, runner,
+#   secrets, strategy, matrix, needs, inputs
+#
+# Reglas de seguridad aplicadas en todo el fichero:
+#   - Ningun valor de secrets.* se imprime: solo se comprueba si existe.
+#   - Los valores que puede controlar un usuario (inputs de texto libre) nunca se
+#     interpolan con ${{ }} dentro de "run:"; se pasan por "env:" y se validan.
+#   - Permisos minimos para GITHUB_TOKEN (contents: read).
+
+name: P10 - Contextos de GitHub Actions
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/**"
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      entorno:
+        description: "Entorno de despliegue simulado"
+        type: choice
+        options: [desarrollo, pruebas, produccion]
+        default: desarrollo
+        required: true
+      ejecutar_pruebas:
+        description: "Ejecutar la matriz de pruebas"
+        type: boolean
+        default: true
+      etiqueta:
+        description: "Etiqueta libre de la version (solo [A-Za-z0-9._-], max. 32)"
+        type: string
+        default: "v0.0.0-demo"
+        required: false
+
+# GITHUB_TOKEN con el minimo privilegio necesario
+permissions:
+  contents: read
+
+# Una sola ejecucion por rama; la nueva cancela a la anterior (contexto github)
+concurrency:
+  group: p10-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Contexto env (nivel workflow) + contexto vars con valor por defecto
+env:
+  PRACTICA: "P10"
+  NIVEL_ENV: "workflow"
+  APP_NAME: ${{ vars.APP_NAME || 'app-sin-variable' }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Diagnostico seguro y decision segun el evento
+  # ---------------------------------------------------------------------------
+  diagnostico:
+    name: Diagnostico seguro de contextos
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      NIVEL_ENV: "job"
+    outputs:
+      entorno: ${{ steps.decidir.outputs.entorno }}
+      modo: ${{ steps.decidir.outputs.modo }}
+      ejecutar_pruebas: ${{ steps.decidir.outputs.ejecutar_pruebas }}
+      etiqueta: ${{ steps.decidir.outputs.etiqueta }}
+    steps:
+      - name: "[github] Campos no sensibles del evento"
+        env:
+          EVENTO: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          SHA: ${{ github.sha }}
+          WORKFLOW: ${{ github.workflow }}
+          JOB_ID: ${{ github.job }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_NUMBER: ${{ github.run_number }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          REPO: ${{ github.repository }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          echo "github.event_name  = $EVENTO"
+          echo "github.ref         = $REF"
+          echo "github.ref_name    = $REF_NAME ($REF_TYPE)"
+          echo "github.sha (corto) = ${SHA:0:7}"
+          echo "github.workflow    = $WORKFLOW"
+          echo "github.job         = $JOB_ID"
+          echo "github.run_id      = $RUN_ID"
+          echo "github.run_number  = $RUN_NUMBER (intento $RUN_ATTEMPT)"
+          # Repositorio y actor identifican a la persona: se imprimen
+          # anonimizados (solo longitud) para poder compartir el log.
+          echo "github.repository  = <anonimizado, ${#REPO} caracteres>"
+          echo "github.actor       = <anonimizado, ${#ACTOR} caracteres>"
+
+      - name: "[runner] Entorno de ejecucion"
+        run: |
+          echo "runner.os          = ${{ runner.os }}"
+          echo "runner.arch        = ${{ runner.arch }}"
+          echo "runner.environment = ${{ runner.environment }}"
+          echo "runner.temp        = ${{ runner.temp }}"
+          echo "runner.tool_cache  = ${{ runner.tool_cache }}"
+
+      - name: "[env] [vars] Precedencia de variables de entorno"
+        env:
+          NIVEL_ENV: "step"
+        run: |
+          echo "env.PRACTICA  = ${{ env.PRACTICA }}"
+          echo "env.APP_NAME  = ${{ env.APP_NAME }}   (origen: vars.APP_NAME o valor por defecto)"
+          echo "env.NIVEL_ENV = ${{ env.NIVEL_ENV }}   (step > job > workflow)"
+          echo "vars.APP_NAME definida: ${{ vars.APP_NAME != '' }}"
+
+      - name: "[inputs] Entradas del lanzamiento manual"
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          IN_ENTORNO: ${{ inputs.entorno }}
+          IN_PRUEBAS: ${{ inputs.ejecutar_pruebas }}
+        run: |
+          echo "inputs.entorno          = $IN_ENTORNO"
+          echo "inputs.ejecutar_pruebas = $IN_PRUEBAS"
+          # inputs.etiqueta es texto libre: NO se imprime aqui (se valida en el paso siguiente)
+
+      - name: "[github] [inputs] Decidir comportamiento segun el evento"
+        id: decidir
+        env:
+          EVENTO: ${{ github.event_name }}
+          IN_ENTORNO: ${{ inputs.entorno }}
+          IN_PRUEBAS: ${{ inputs.ejecutar_pruebas }}
+          IN_ETIQUETA: ${{ inputs.etiqueta }}
+        run: |
+          case "$EVENTO" in
+            workflow_dispatch) entorno="$IN_ENTORNO"; pruebas="$IN_PRUEBAS"; modo="manual" ;;
+            pull_request)      entorno="pruebas";     pruebas="true";        modo="validacion-pr" ;;
+            push)              entorno="desarrollo";  pruebas="true";        modo="integracion" ;;
+            *)                 entorno="desarrollo";  pruebas="true";        modo="otro" ;;
+          esac
+
+          # Defensa en profundidad: lista blanca de entornos
+          case "$entorno" in
+            desarrollo|pruebas|produccion) ;;
+            *) echo "::error::Entorno no permitido"; exit 1 ;;
+          esac
+
+          # La etiqueta es entrada no confiable: se valida con una expresion regular
+          # y, si no cumple, se sustituye SIN imprimir el valor recibido.
+          if [ -z "$IN_ETIQUETA" ]; then
+            etiqueta="sin-etiqueta"
+          elif [[ "$IN_ETIQUETA" =~ ^[A-Za-z0-9._-]{1,32}$ ]]; then
+            etiqueta="$IN_ETIQUETA"
+          else
+            etiqueta="rechazada"
+            echo "::warning title=Entrada rechazada::inputs.etiqueta no cumple ^[A-Za-z0-9._-]{1,32}\$; se usa 'rechazada'"
+          fi
+
+          {
+            echo "entorno=$entorno"
+            echo "modo=$modo"
+            echo "ejecutar_pruebas=$pruebas"
+            echo "etiqueta=$etiqueta"
+          } >> "$GITHUB_OUTPUT"
+          echo "Decision: evento=$EVENTO -> modo=$modo, entorno=$entorno, pruebas=$pruebas, etiqueta=$etiqueta"
+
+      - name: "[secrets] Uso de GITHUB_TOKEN sin revelarlo"
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            echo "secrets.GITHUB_TOKEN disponible (valor NO impreso)"
+          fi
+          # Uso legitimo del token: consultar la API del propio repositorio.
+          visibilidad=$(curl -fsS -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO" | jq -r '.visibility')
+          echo "Visibilidad del repositorio (via API con el token): $visibilidad"
+
+      - name: "[secrets] Enmascarar un valor derivado con add-mask"
+        run: |
+          id_sesion=$(openssl rand -hex 8)
+          echo "::add-mask::$id_sesion"
+          echo "Identificador de sesion generado: $id_sesion"
+          echo "(GitHub lo sustituye por *** en el log porque se registro con add-mask)"
+
+      - name: "[steps] Paso que falla de forma controlada"
+        id: fallo_controlado
+        continue-on-error: true
+        run: |
+          echo "Este paso termina con codigo 1 a proposito"
+          exit 1
+
+      - name: "[steps] outcome frente a conclusion"
+        env:
+          OUTCOME: ${{ steps.fallo_controlado.outcome }}
+          CONCLUSION: ${{ steps.fallo_controlado.conclusion }}
+          SALIDA_ENTORNO: ${{ steps.decidir.outputs.entorno }}
+        run: |
+          echo "steps.decidir.outputs.entorno          = $SALIDA_ENTORNO"
+          echo "steps.fallo_controlado.outcome    = $OUTCOME"
+          echo "steps.fallo_controlado.conclusion = $CONCLUSION"
+          echo "Con continue-on-error, 'outcome' es el resultado real y 'conclusion' el resultado tras aplicar continue-on-error."
+
+      - name: "[job] Estado del job"
+        if: always()
+        run: |
+          echo "job.status = ${{ job.status }}"
+
+  # ---------------------------------------------------------------------------
+  # 2. Matriz de pruebas (strategy + matrix + runner.os)
+  # ---------------------------------------------------------------------------
+  matriz:
+    name: Matriz (${{ matrix.os }}, py${{ matrix.python }})
+    needs: diagnostico
+    # R1: el input ejecutar_pruebas decide si este job se ejecuta
+    if: needs.diagnostico.outputs.ejecutar_pruebas == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.12", "3.13"]
+        exclude:
+          - os: windows-latest
+            python: "3.12"
+    steps:
+      - name: Configurar Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: "[strategy] [matrix] Informacion de la combinacion"
+        shell: bash
+        run: |
+          echo "strategy.job-index    = ${{ strategy.job-index }}"
+          echo "strategy.job-total    = ${{ strategy.job-total }}"
+          echo "strategy.fail-fast    = ${{ strategy.fail-fast }}"
+          echo "strategy.max-parallel = ${{ strategy.max-parallel }}"
+          echo "matrix.os             = ${{ matrix.os }}"
+          echo "matrix.python         = ${{ matrix.python }}"
+          echo "runner.os / arch      = ${{ runner.os }} / ${{ runner.arch }}"
+
+      - name: "[runner] Solo en Linux"
+        if: runner.os == 'Linux'
+        run: echo "Paso exclusivo de Linux - kernel $(uname -r)"
+
+      - name: "[runner] Solo en Windows"
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Write-Output "Paso exclusivo de Windows - $([System.Environment]::OSVersion.VersionString)"
+
+      - name: "[matrix] Solo en ubuntu-latest + Python 3.13"
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.13'
+        run: echo "Combinacion de referencia; aqui se publicaria la cobertura"
+
+      - name: Prueba minima
+        shell: bash
+        run: python -c "import sys, platform; assert sys.version_info >= (3, 12); print('OK', platform.python_version(), platform.system())"
+
+  # ---------------------------------------------------------------------------
+  # 3. Workflow reutilizable (dentro usa el contexto jobs)
+  # ---------------------------------------------------------------------------
+  informe:
+    name: Informe reutilizable
+    needs: diagnostico
+    uses: ./.github/workflows/p10-reutilizable.yml
+    with:
+      entorno: ${{ needs.diagnostico.outputs.entorno }}
+      etiqueta: ${{ needs.diagnostico.outputs.etiqueta }}
+
+  # ---------------------------------------------------------------------------
+  # 4. Despliegue simulado: solo en lanzamientos manuales
+  # ---------------------------------------------------------------------------
+  despliegue:
+    name: Despliegue simulado (${{ needs.diagnostico.outputs.entorno }})
+    needs: [diagnostico, matriz]
+    # R2: condicion sobre github.event_name; always() permite ejecutar aunque
+    # la matriz se haya omitido (skipped) por el input ejecutar_pruebas=false
+    if: >-
+      always() &&
+      github.event_name == 'workflow_dispatch' &&
+      needs.diagnostico.result == 'success' &&
+      contains(fromJSON('["success", "skipped"]'), needs.matriz.result)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      ENTORNO: ${{ needs.diagnostico.outputs.entorno }}
+      ETIQUETA: ${{ needs.diagnostico.outputs.etiqueta }}
+      # Los secretos no pueden usarse directamente en "if:"; se expone solo
+      # si existen (true/false), nunca su valor.
+      TIENE_DEPLOY_KEY: ${{ secrets.DEPLOY_KEY != '' }}
+    steps:
+      - name: "[needs] Plan de despliegue"
+        run: |
+          echo "Desplegando $APP_NAME version $ETIQUETA en '$ENTORNO'"
+          echo "needs.matriz.result = ${{ needs.matriz.result }}"
+
+      - name: "[inputs] Controles adicionales en produccion"
+        if: inputs.entorno == 'produccion'
+        run: echo "::notice title=Produccion::Se aplicarian aprobaciones y copia de seguridad previa"
+
+      - name: "[secrets] Despliegue con clave"
+        if: env.TIENE_DEPLOY_KEY == 'true'
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+        run: echo "Clave de despliegue disponible (valor NO impreso)"
+
+      - name: "[secrets] Sin clave de despliegue"
+        if: env.TIENE_DEPLOY_KEY != 'true'
+        run: echo "secrets.DEPLOY_KEY no configurado -> despliegue en modo simulacion"
+
+  # ---------------------------------------------------------------------------
+  # 5. Resumen: siempre se ejecuta y agrega los resultados (needs)
+  # ---------------------------------------------------------------------------
+  resumen:
+    name: Resumen de la ejecucion
+    needs: [diagnostico, matriz, informe, despliegue]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: "[needs] Resultados de los jobs previos"
+        env:
+          R_DIAG: ${{ needs.diagnostico.result }}
+          R_MATRIZ: ${{ needs.matriz.result }}
+          R_INFORME: ${{ needs.informe.result }}
+          R_DESP: ${{ needs.despliegue.result }}
+          MODO: ${{ needs.diagnostico.outputs.modo }}
+          ENTORNO: ${{ needs.diagnostico.outputs.entorno }}
+          RESUMEN_REUT: ${{ needs.informe.outputs.resumen }}
+        run: |
+          echo "modo=$MODO entorno=$ENTORNO"
+          echo "diagnostico=$R_DIAG matriz=$R_MATRIZ informe=$R_INFORME despliegue=$R_DESP"
+          echo "salida del workflow reutilizable: $RESUMEN_REUT"
+          {
+            echo "## P10 - Resumen"
+            echo "| Job | Resultado |"
+            echo "|---|---|"
+            echo "| diagnostico | $R_DIAG |"
+            echo "| matriz | $R_MATRIZ |"
+            echo "| informe (reutilizable) | $R_INFORME |"
+            echo "| despliegue | $R_DESP |"
+            echo ""
+            echo "Modo: \`$MODO\` - Entorno: \`$ENTORNO\` - Reutilizable: \`$RESUMEN_REUT\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: "[job] Gestion de fallos"
+        if: failure() || contains(needs.*.result, 'failure')
+        run: echo "::error::Algun job previo ha fallado; revisar los logs"
+
+      - name: "[job] Estado final"
+        if: always()
+        run: echo "job.status = ${{ job.status }}"

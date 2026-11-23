@@ -81,8 +81,9 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           RUN_NUMBER: ${{ github.run_number }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
-          REPO: ${{ github.repository }}
-          ACTOR: ${{ github.actor }}
+          # repository y actor NO se pasan por env: el runner imprime el bloque
+          # env de cada paso en el log. Se usan las variables predefinidas
+          # GITHUB_REPOSITORY y GITHUB_ACTOR, que no aparecen en ese bloque.
         run: |
           echo "github.event_name  = $EVENTO"
           echo "github.ref         = $REF"
@@ -94,8 +95,8 @@ jobs:
           echo "github.run_number  = $RUN_NUMBER (intento $RUN_ATTEMPT)"
           # Repositorio y actor identifican a la persona: se imprimen
           # anonimizados (solo longitud) para poder compartir el log.
-          echo "github.repository  = <anonimizado, ${#REPO} caracteres>"
-          echo "github.actor       = <anonimizado, ${#ACTOR} caracteres>"
+          echo "github.repository  = <anonimizado, ${#GITHUB_REPOSITORY} caracteres>"
+          echo "github.actor       = <anonimizado, ${#GITHUB_ACTOR} caracteres>"
 
       - name: "[runner] Entorno de ejecucion"
         run: |
@@ -167,7 +168,6 @@ jobs:
       - name: "[secrets] Uso de GITHUB_TOKEN sin revelarlo"
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
         run: |
           if [ -n "$TOKEN" ]; then
             echo "secrets.GITHUB_TOKEN disponible (valor NO impreso)"
@@ -175,7 +175,7 @@ jobs:
           # Uso legitimo del token: consultar la API del propio repositorio.
           visibilidad=$(curl -fsS -H "Authorization: Bearer $TOKEN" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/$REPO" | jq -r '.visibility')
+            "https://api.github.com/repos/$GITHUB_REPOSITORY" | jq -r '.visibility')
           echo "Visibilidad del repositorio (via API con el token): $visibilidad"
 
       - name: "[secrets] Enmascarar un valor derivado con add-mask"

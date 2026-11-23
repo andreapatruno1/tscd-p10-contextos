@@ -1,0 +1,44 @@
+# P10 - Workflow reutilizable: demuestra el contexto "jobs"
+# El contexto jobs solo existe en workflows reutilizables y sirve para exponer
+# las salidas de sus jobs como salidas del workflow (on.workflow_call.outputs).
+
+name: P10 - Informe reutilizable
+
+on:
+  workflow_call:
+    inputs:
+      entorno:
+        description: "Entorno decidido por el workflow llamante"
+        type: string
+        required: true
+      etiqueta:
+        description: "Etiqueta ya validada por el workflow llamante"
+        type: string
+        required: false
+        default: "sin-etiqueta"
+    outputs:
+      resumen:
+        description: "Resumen generado por el job interno"
+        value: ${{ jobs.generar.outputs.resumen }}
+
+permissions:
+  contents: read
+
+jobs:
+  generar:
+    name: Generar resumen
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      resumen: ${{ steps.componer.outputs.resumen }}
+    steps:
+      - name: "[inputs] [github] Componer resumen"
+        id: componer
+        env:
+          ENTORNO: ${{ inputs.entorno }}
+          ETIQUETA: ${{ inputs.etiqueta }}
+          EVENTO: ${{ github.event_name }}
+        run: |
+          resumen="entorno=${ENTORNO};etiqueta=${ETIQUETA};evento=${EVENTO};run=${GITHUB_RUN_NUMBER}"
+          echo "resumen=$resumen" >> "$GITHUB_OUTPUT"
+          echo "Resumen generado: $resumen"
